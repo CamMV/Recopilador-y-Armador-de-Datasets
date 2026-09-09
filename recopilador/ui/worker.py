@@ -22,25 +22,26 @@ class Trabajador(object):
     def activo(self) -> bool:
         return self._hilo is not None and self._hilo.is_alive()
 
-    def iniciar(self, tema, n, settings):
+    def iniciar(self, tema, n, settings, plataforma: str = "youtube"):
         if self.activo():
             raise RuntimeError("ya hay una recoleccion en curso")
         self.cancel = threading.Event()
         self.cola = queue.Queue()
         self._hilo = threading.Thread(
-            target=self._correr, args=(tema, n, settings), daemon=True)
+            target=self._correr, args=(tema, n, settings, plataforma), daemon=True)
         self._hilo.start()
 
     def cancelar(self):
         self.cancel.set()
 
     # -- cuerpo del hilo -------------------------------------------------
-    def _correr(self, tema, n, settings):
+    def _correr(self, tema, n, settings, plataforma):
         def on_progress(tipo, **datos):
             self.cola.put((tipo, datos))
 
         try:
             pipeline.recolectar(tema, n, settings,
+                                plataforma=plataforma,
                                 on_progress=on_progress,
                                 cancel_event=self.cancel)
         except Exception as exc:

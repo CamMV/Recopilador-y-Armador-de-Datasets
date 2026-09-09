@@ -13,3 +13,7 @@ google-api-python-client>=2.100.0
 # Transcripcion local (etapa de analisis). Trae PyAV, asi que decodifica los
 # .mp4 sin depender del ffmpeg.exe que usa la descarga.
 faster-whisper>=1.1.0
+
+# Para TikTok e Instagram
+instagraapi>=2.0.0        # Scraping y API no oficial de Instagram
+Playwright>=1.40.0        # Automatización de navegador para bypass de retos de TikTok/IG
