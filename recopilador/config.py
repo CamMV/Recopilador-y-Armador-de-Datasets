@@ -51,14 +51,7 @@ def localizar_ffmpeg() -> Optional[str]:
 
 
 def localizar_js_runtime() -> dict:
-    """Motores de JavaScript que yt-dlp puede usar, en el formato de `js_runtimes`.
-
-    YouTube protege las URLs de sus formatos con un reto en JavaScript. Sin un
-    motor para resolverlo, yt-dlp cae a un modo degradado que usa un solo
-    cliente de reproduccion, y ahi YouTube responde con "The page needs to be
-    reloaded" o 403 muy a menudo. yt-dlp solo habilita `deno` por su cuenta, de
-    modo que aqui se declaran tambien node y bun si estan en el equipo.
-    """
+    """Motores de JavaScript que yt-dlp puede usar, en el formato de `js_runtimes`."""
     runtimes = {}
     for nombre in ("deno", "node", "bun"):
         ruta = shutil.which(nombre)
@@ -75,23 +68,36 @@ class Settings:
     max_duration: int = 180         # segundos; tope real de un Short desde 2024
     max_resolucion: int = 720       # lado corto: en vertical la altura es el lado largo
     concurrency: int = 2
-    sleep_interval: float = 1.0     # pausa minima entre peticiones de yt-dlp
+    sleep_interval: float = 1.0     # pausa minima entre peticiones
     solo_vertical: bool = True
     subtitulos: bool = True
     idiomas_subs: List[str] = field(default_factory=lambda: ["es", "en"])
+    
+    # Credenciales y claves de APIs
     youtube_api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("YOUTUBE_API_KEY") or None
     )
+    instagram_username: Optional[str] = field(
+        default_factory=lambda: os.getenv("INSTAGRAM_USERNAME") or None
+    )
+    instagram_password: Optional[str] = field(
+        default_factory=lambda: os.getenv("INSTAGRAM_PASSWORD") or None
+    )
+    cookies_path: Optional[Path] = field(
+        default_factory=lambda: (RAIZ / "cookies.txt") if (RAIZ / "cookies.txt").exists() else None
+    )
+
     ffmpeg_dir: Optional[str] = field(default_factory=localizar_ffmpeg)
     js_runtimes: dict = field(default_factory=localizar_js_runtime)
 
-    # YouTube limita el ritmo por rafagas: un lote entero puede fallar y los
-    # mismos videos bajar sin problema minutos despues. De ahi los reintentos.
+    # Reintentos por rafagas de bloqueo
     reintentos: int = 2             # rondas extra sobre los fallos transitorios
     pausa_reintento: float = 25.0   # segundos de espera antes de cada ronda
 
     def __post_init__(self):
         self.data_dir = Path(self.data_dir)
+        if self.cookies_path:
+            self.cookies_path = Path(self.cookies_path)
 
     # -- rutas derivadas -------------------------------------------------
     @property
@@ -121,24 +127,29 @@ class Settings:
         return self
 
     def localizar_video(self, video_id: str,
-                        ruta_guardada: str = "") -> Optional[Path]:
+                        ruta_guardada: str = "",
+                        plataforma: str = "youtube") -> Optional[Path]:
         """Ruta real del video, o None si no esta en disco.
 
-        `videos.ruta_video` guarda una ruta absoluta, y basta con abrir el mismo
-        corpus desde otro sitio para que deje de resolver: dentro del contenedor
-        es "/app/data/videos/x.mp4" y en Windows "C:\\...\\data\\videos\\x.mp4".
-        Sin este respaldo, `Store.reconciliar` daba por perdidos videos que
-        estaban ahi, los borraba del indice y barria sus fichas y subtitulos, con
-        lo que abrir el corpus en los dos entornos lo iba destruyendo.
-
-        Quien manda es la convencion de nombres --el fichero es "<video_id>.<ext>"
-        dentro de `videos_dir`--; la ruta guardada solo es un atajo por si el
-        corpus tiene una disposicion antigua.
+        Soporta nombres con prefijo de plataforma (`tiktok_12345.mp4`) y
+        mantiene retrocompatibilidad con el formato antiguo sin prefijo (`abc123.mp4`).
         """
         if ruta_guardada:
             ruta = Path(ruta_guardada)
             if ruta.exists():
                 return ruta
-        encontrados = [p for p in self.videos_dir.glob("%s.*" % video_id)
-                       if p.suffix.lower() in EXT_VIDEO]
-        return encontrados[0] if encontrados else None
+
+        # 1. Buscar con convencion de plataforma (ej: instagram_abc123.mp4)
+        encontrados_prefijo = [
+            p for p in self.videos_dir.glob(f"{plataforma}_{video_id}.*")
+            if p.suffix.lower() in EXT_VIDEO
+        ]
+        if encontrados_prefijo:
+            return encontrados_prefijo[0]
+
+        # 2. Fallback sin prefijo (retrocompatibilidad con YouTube)
+        encontrados_legacy = [
+            p for p in self.videos_dir.glob(f"{video_id}.*")
+            if p.suffix.lower() in EXT_VIDEO
+        ]
+        return encontrados_legacy[0] if encontrados_legacy else None

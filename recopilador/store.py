@@ -16,7 +16,8 @@ from .models import RegistroVideo
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS videos (
-    video_id      TEXT PRIMARY KEY,
+    video_id      TEXT,
+    plataforma    TEXT DEFAULT 'youtube',
     tema          TEXT,
     titulo        TEXT,
     url           TEXT,
@@ -34,11 +35,13 @@ CREATE TABLE IF NOT EXISTS videos (
     origen        TEXT,
     estado        TEXT,
     detalle       TEXT,
-    transcrito    INTEGER DEFAULT 0
+    transcrito    INTEGER DEFAULT 0,
+    PRIMARY KEY (plataforma, video_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_videos_tema   ON videos(tema);
 CREATE INDEX IF NOT EXISTS idx_videos_estado ON videos(estado);
+CREATE INDEX IF NOT EXISTS idx_videos_plataforma ON videos(plataforma);
 
 CREATE TABLE IF NOT EXISTS busquedas (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +56,7 @@ CREATE TABLE IF NOT EXISTS busquedas (
 """
 
 _CAMPOS = [
-    "video_id", "tema", "titulo", "url", "canal", "duracion", "ancho", "alto",
+    "video_id", "plataforma", "tema", "titulo", "url", "canal", "duracion", "ancho", "alto",
     "vistas", "fecha_subida", "ruta_video", "ruta_meta", "ruta_subs",
     "bytes_video", "descargado_en", "origen", "estado", "detalle",
 ]
@@ -72,6 +75,46 @@ class Store:
 
     def init_db(self):
         with self._lock:
+            current = self._con.execute("PRAGMA table_info(videos)")
+            columnas = [row["name"] for row in current.fetchall()]
+            if columnas and "plataforma" not in columnas:
+                self._con.executescript("""
+                    CREATE TABLE videos_nueva (
+                        video_id      TEXT,
+                        plataforma    TEXT DEFAULT 'youtube',
+                        tema          TEXT,
+                        titulo        TEXT,
+                        url           TEXT,
+                        canal         TEXT,
+                        duracion      REAL,
+                        ancho         INTEGER,
+                        alto          INTEGER,
+                        vistas        INTEGER,
+                        fecha_subida  TEXT,
+                        ruta_video    TEXT,
+                        ruta_meta     TEXT,
+                        ruta_subs     TEXT,
+                        bytes_video   INTEGER,
+                        descargado_en TEXT,
+                        origen        TEXT,
+                        estado        TEXT,
+                        detalle       TEXT,
+                        transcrito    INTEGER DEFAULT 0,
+                        PRIMARY KEY (plataforma, video_id)
+                    );
+                    INSERT INTO videos_nueva (
+                        video_id, plataforma, tema, titulo, url, canal, duracion,
+                        ancho, alto, vistas, fecha_subida, ruta_video, ruta_meta,
+                        ruta_subs, bytes_video, descargado_en, origen, estado, detalle, transcrito
+                    )
+                    SELECT 
+                        video_id, 'youtube', tema, titulo, url, canal, duracion,
+                        ancho, alto, vistas, fecha_subida, ruta_video, ruta_meta,
+                        ruta_subs, bytes_video, descargado_en, origen, estado, detalle, transcrito
+                    FROM videos;
+                    DROP TABLE videos;
+                    ALTER TABLE videos_nueva RENAME TO videos;
+                """)
             self._con.executescript(ESQUEMA)
             self._con.commit()
 
@@ -80,27 +123,44 @@ class Store:
             self._con.close()
 
     # -- consultas -------------------------------------------------------
-    def ya_existe(self, video_id: str) -> bool:
+    def ya_existe(self, video_id: str, plataforma = "youtube") -> bool:
         """True si el video ya se descargo correctamente antes."""
         with self._lock:
             cur = self._con.execute(
-                "SELECT estado FROM videos WHERE video_id = ?", (video_id,)
+                "SELECT estado FROM videos WHERE video_id = ? AND plataforma = ? ", 
+                (video_id, plataforma),
             )
             fila = cur.fetchone()
         return fila is not None and fila["estado"] == "ok"
 
-    def ids_conocidos(self) -> set:
-        """Ids ya descargados con exito, para filtrar candidatos de una."""
+    def ids_conocidos(self, plataforma: Optional[str] = None) -> set:
+        """Ids ya descargados con exito.
+        
+        Si se especifica 'plataforma', devuelve el set de 'video_id'.
+        Si no se especifica, devuelve el set de tuplas '(plataforma, video_id)'.
+        """
         with self._lock:
-            cur = self._con.execute("SELECT video_id FROM videos WHERE estado = 'ok'")
-            return set(r["video_id"] for r in cur.fetchall())
+            if plataforma:
+                current = self._con.execute(
+                    "SELECT video_id FROM videos WHERE estado = 'ok' AND plataforma = ?",
+                    (plataforma, )
+                )
+                return set(r["video_id"] for r in current.fetchall())
+            else:
+                current = self._con.execute(
+                    "SELECT plataforma, video_id FROM videos WHERE estado = 'ok'"
+                )
+                return set((r["plataforma"], r["video_id"]) for r in current.fetchall())
 
-    def listar(self, tema: Optional[str] = None, solo_ok: bool = True) -> List[sqlite3.Row]:
+    def listar(self, tema: Optional[str] = None, plataforma: Optional[str] = None, solo_ok: bool = True) -> List[sqlite3.Row]:
         sql = "SELECT * FROM videos"
         cond, params = [], []
         if tema:
             cond.append("tema = ?")
             params.append(tema)
+        if plataforma:
+            cond.append("plataforma = ?")
+            params.append(plataforma)
         if solo_ok:
             cond.append("estado = 'ok'")
         if cond:
@@ -122,7 +182,7 @@ class Store:
         """
         with self._lock:
             filas = self._con.execute(
-                "SELECT video_id, ruta_video FROM videos WHERE estado = 'ok'"
+                "SELECT video_id, plataforma, ruta_video FROM videos WHERE estado = 'ok'"
             ).fetchall()
 
         perdidos, vivos, recolocados = [], [], []
@@ -132,27 +192,32 @@ class Store:
             # se abre desde otro sitio --el contenedor lo ve en /app/data--, y
             # dar por perdido lo que solo esta en otra ruta borraba del indice
             # videos que seguian en disco.
-            real = settings.localizar_video(f["video_id"], f["ruta_video"] or "")
+            plat = f["plataforma"] or "youtube"
+            vid = f["video_id"]
+            real = settings.localizar_video(vid, f["ruta_video"] or "", plataforma = plat)
             if real is None:
-                perdidos.append(f["video_id"])
+                perdidos.append((plat,vid))
                 continue
-            vivos.append(f["video_id"])
+            vivos.append((plat,vid))
             if str(real) != (f["ruta_video"] or ""):
-                recolocados.append((str(real), f["video_id"]))
+                recolocados.append((str(real), plat, vid))
 
         if recolocados:
             # Se deja la ruta al dia para que la proxima pasada no tenga que
             # volver a buscar, y para que el analisis abra el fichero correcto.
             with self._lock:
                 self._con.executemany(
-                    "UPDATE videos SET ruta_video = ? WHERE video_id = ?",
-                    recolocados)
+                    "UPDATE videos SET ruta_video = ? WHERE plataforma = ? AND video_id = ?",
+                    [(r[0], r[1], r[2]) for r in recolocados],
+                )
                 self._con.commit()
 
         if perdidos:
             with self._lock:
-                self._con.executemany("DELETE FROM videos WHERE video_id = ?",
-                                      [(v,) for v in perdidos])
+                self._con.executemany(
+                    "DELETE FROM videos WHERE plataforma = ? AND video_id = ?",
+                    perdidos,
+                )
                 self._con.commit()
 
         self._sincronizar_archivo(Path(settings.archive_path), vivos)
@@ -167,13 +232,20 @@ class Store:
         del corpus y falsean cualquier recuento posterior.
         """
         barridas = 0
+        # Convencion esperada de nombres de archivo: "<plataforma>_<id>.*" o "<id>.*"
+        vivos_claves = set()
+        for plat, vid in vivos:
+            vivos_claves.add(vid)
+            vivos_claves.add(f"{plat}_{vid}")
+
         for carpeta in (settings.meta_dir, settings.subs_dir):
             if not carpeta.exists():
                 continue
             for resto in carpeta.iterdir():
-                # Los nombres son "<id>.info.json" y "<id>.es.vtt"; un id de
-                # YouTube nunca lleva punto, asi que el primer trozo es el id.
-                if not resto.is_file() or resto.name.split(".")[0] in vivos:
+                if not resto.is_file():
+                    continue
+                identificador = resto.name.split(".")[0]
+                if identificador in vivos_claves:
                     continue
                 try:
                     resto.unlink()
@@ -183,9 +255,9 @@ class Store:
         return barridas
 
     @staticmethod
-    def _sincronizar_archivo(ruta: Path, ids: List[str]) -> bool:
+    def _sincronizar_archivo(ruta: Path, entradas: List[tuple[str, str]]) -> bool:
         """Deja archive.txt con exactamente los ids dados. True si hubo cambios."""
-        deseado = ["youtube %s" % v for v in ids]
+        deseado = [f"{plat} {vid}" for plat, vid in entradas]
         actual = []
         if ruta.exists():
             with io.open(str(ruta), encoding="utf-8") as f:
@@ -201,8 +273,11 @@ class Store:
     # -- escritura -------------------------------------------------------
     def guardar(self, reg: RegistroVideo):
         d = reg.como_dict()
+        if not d.get("plataforma"):
+            d["plataforma"] = "youtube"
         if not d.get("descargado_en"):
             d["descargado_en"] = datetime.now().isoformat(timespec="seconds")
+        
         valores = [d.get(c) for c in _CAMPOS]
         sql = "INSERT OR REPLACE INTO videos (%s) VALUES (%s)" % (
             ", ".join(_CAMPOS), ", ".join("?" * len(_CAMPOS))
@@ -211,13 +286,21 @@ class Store:
             self._con.execute(sql, valores)
             self._con.commit()
 
-    def registrar_busqueda(self, tema, backend, n_pedidos, n_candidatos,
-                           n_descargados, cancelado=False):
+    def registrar_busqueda(
+        self, tema, backend, n_pedidos, n_candidatos, n_descargados, cancelado=False
+    ):
         with self._lock:
             self._con.execute(
                 "INSERT INTO busquedas (tema, fecha, backend, n_pedidos, "
                 "n_candidatos, n_descargados, cancelado) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (tema, datetime.now().isoformat(timespec="seconds"), backend,
-                 n_pedidos, n_candidatos, n_descargados, 1 if cancelado else 0),
+                (
+                    tema,
+                    datetime.now().isoformat(timespec="seconds"),
+                    backend,
+                    n_pedidos,
+                    n_candidatos,
+                    n_descargados,
+                    1 if cancelado else 0,
+                ),
             )
             self._con.commit()
