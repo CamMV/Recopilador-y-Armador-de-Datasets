@@ -15,6 +15,7 @@ class Candidato:
     """Un video encontrado en la busqueda, aun sin descargar."""
 
     video_id: str
+    plataforma = str
     titulo: str = ""
     url: str = ""
     duracion: Optional[float] = None
@@ -31,6 +32,7 @@ class RegistroVideo:
     """Resultado de intentar descargar un candidato."""
 
     video_id: str
+    plataforma: str
     tema: str = ""
     titulo: str = ""
     url: str = ""
