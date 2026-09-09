@@ -32,7 +32,7 @@ class RegistroVideo:
     """Resultado de intentar descargar un candidato."""
 
     video_id: str
-    plataforma: str
+    plataforma: str = "youtube"
     tema: str = ""
     titulo: str = ""
     url: str = ""

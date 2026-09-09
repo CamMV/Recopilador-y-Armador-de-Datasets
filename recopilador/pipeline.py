@@ -6,10 +6,10 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable, Optional
 
-from . import search
-from .downloader import Cancelado, descargar, es_transitorio
+from .downloader import Cancelado, es_transitorio
 from .models import (ESTADO_DESCARTADO, ESTADO_ERROR, ESTADO_OK, ESTADO_OMITIDO,
                      RegistroVideo, Resumen)
+from .providers import BaseScraper, obtener_provider
 from .store import Store
 
 
@@ -44,10 +44,11 @@ def _limpiar_parciales(settings):
 def recolectar(tema: str,
                n: int,
                settings,
+               plataforma: str = "youtube",
                on_progress: Optional[Callable[..., None]] = None,
                cancel_event: Optional[threading.Event] = None,
                store: Optional[Store] = None) -> Resumen:
-    """Descarga hasta `n` Shorts sobre `tema`.
+    """Descarga hasta `n` videos sobre `tema` usando la plataforma indicada.
 
     on_progress(tipo, **datos) recibe eventos: "log", "busqueda", "video", "fin".
     """
@@ -65,29 +66,33 @@ def recolectar(tema: str,
     resumen = Resumen(tema=tema, pedidos=n)
 
     try:
+        # Instanciar el proveedor correspondiente (YouTube, TikTok, Instagram)
+        provider = obtener_provider(plataforma, settings)
+
         faltantes, huerfanas = store.reconciliar(settings)
         if faltantes:
-            log("%d videos del indice ya no estan en disco: se descartan del "
-                "indice y se podran volver a descargar" % faltantes)
+            log("%d videos del indice ya no estan en disco: se descartan" % faltantes)
         if huerfanas:
             log("%d fichas o subtitulos sueltos sin video: se borran" % huerfanas)
 
-        conocidos = store.ids_conocidos()
+        # Filtrar IDs conocidos para esta plataforma en especifico
+        conocidos = store.ids_conocidos(plataforma) if hasattr(store, "ids_conocidos") else store.ids_conocidos()
         if conocidos:
-            log("%d videos ya en el indice se excluiran de la busqueda" % len(conocidos))
+            log("[%s] %d videos ya en el indice se excluiran de la busqueda" % (plataforma.upper(), len(conocidos)))
 
-        candidatos, backend = search.buscar(
-            tema, n, settings, excluir=conocidos, log=log, cancel_event=bandera)
-        resumen.backend = backend
+        log("[%s] Buscando videos para el tema '%s'..." % (plataforma.upper(), tema))
+        candidatos = provider.buscar(tema, n, ids_excluir=conocidos)
+
+        resumen.backend = plataforma
         resumen.candidatos = len(candidatos)
-        emitir("busqueda", candidatos=len(candidatos), backend=backend, objetivo=n)
+        emitir("busqueda", candidatos=len(candidatos), backend=plataforma, objetivo=n)
 
         if not candidatos:
             log("la busqueda no devolvio candidatos nuevos")
         elif bandera.is_set():
             resumen.cancelado = True
         else:
-            _rondas(candidatos, tema, n, settings, store, resumen,
+            _rondas(provider, candidatos, tema, n, settings, store, resumen,
                     emitir, log, bandera, parar)
 
         if cancel_event is not None and cancel_event.is_set():
@@ -117,25 +122,20 @@ def _contabilizar(reg: RegistroVideo, resumen: Resumen):
         resumen.errores += 1
 
 
-def _rondas(candidatos, tema, n, settings, store, resumen, emitir, log,
-            bandera, parar):
-    """Descarga en rondas: lo que falla por limite de YouTube se reintenta.
-
-    Un lote entero puede fallar porque YouTube esta cortando las peticiones en
-    ese momento; sin reintentos la corrida termina con cero descargas aunque
-    los videos esten perfectamente disponibles.
-    """
+def _rondas(provider: BaseScraper, candidatos, tema, n, settings, store, resumen,
+            emitir, log, bandera, parar):
+    """Descarga en rondas con reintentos para fallos transitorios."""
     pendientes = list(candidatos)
     for intento in range(settings.reintentos + 1):
-        fallidos, sobrantes = _descargar_lote(pendientes, tema, n, settings,
+        fallidos, sobrantes = _descargar_lote(provider, pendientes, tema, n, settings,
                                               store, resumen, emitir, bandera,
                                               parar, intento)
         pendientes = fallidos + sobrantes
         if not pendientes or resumen.descargados >= n or bandera.is_set():
             break
         if not fallidos:
-            continue                # solo quedaban candidatos sin estrenar
-        log("%d descargas fallaron por limite de YouTube; se reintentan en %.0f s"
+            continue
+        log("%d descargas fallaron de forma temporal; se reintentan en %.0f s"
             % (len(fallidos), settings.pausa_reintento))
         if _esperar(settings.pausa_reintento, bandera):
             break
@@ -145,27 +145,37 @@ def _rondas(candidatos, tema, n, settings, store, resumen, emitir, log,
 
     faltan = n - resumen.descargados
     if resumen.errores >= faltan:
-        log("YouTube rechazo las descargas de forma repetida (limite de "
-            "peticiones). Espera unos minutos y vuelve a intentarlo; si sigue "
-            "igual, baja las descargas simultaneas a 1.")
+        log("Error recurrente en la descarga. Verifica conectividad o limites de la plataforma.")
     else:
-        log("se agotaron los candidatos: %d de %d descargados "
-            "(sube la cantidad pedida o amplia la duracion maxima)"
-            % (resumen.descargados, n))
+        log("Se agotaron los candidatos: %d de %d descargados." % (resumen.descargados, n))
 
 
-def _descargar_lote(candidatos, tema, n, settings, store, resumen, emitir,
-                    bandera, parar, intento=0):
-    """Lanza una ronda de descargas.
-
-    Devuelve (fallidos_reintentables, no_intentados): los primeros fallaron por
-    algo pasajero, los segundos ni se llegaron a pedir porque ya se habia
-    cumplido el objetivo.
-    """
+def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
+                    resumen, emitir, bandera, parar, intento=0):
+    """Lanza ejecuciones paralelas de provider.descargar()."""
     pendientes = iter(candidatos)
     en_vuelo = {}
     reintentables = []
     ultima_ronda = intento >= settings.reintentos
+
+    def ejecutar_descarga(candidato):
+        if bandera.is_set():
+            raise Cancelado()
+        
+        reg = provider.descargar(candidato)
+        if reg is None:
+            return RegistroVideo(
+                video_id=candidato.video_id,
+                plataforma=provider.PLATAFORMA,
+                tema=tema,
+                url=candidato.url,
+                titulo=candidato.titulo,
+                estado=ESTADO_ERROR,
+                detalle="Error al descargar o procesar con el proveedor"
+            )
+        
+        reg.tema = tema
+        return reg
 
     def procesar(fut):
         cand = en_vuelo.pop(fut)
@@ -173,13 +183,17 @@ def _descargar_lote(candidatos, tema, n, settings, store, resumen, emitir,
             reg = fut.result()
         except Cancelado:
             return
-        except Exception as exc:                    # red de seguridad
-            reg = RegistroVideo(video_id=cand.video_id, tema=tema, url=cand.url,
-                                titulo=cand.titulo, estado=ESTADO_ERROR,
-                                detalle=str(exc)[:300])
+        except Exception as exc:
+            reg = RegistroVideo(
+                video_id=cand.video_id,
+                plataforma=provider.PLATAFORMA,
+                tema=tema,
+                url=cand.url,
+                titulo=cand.titulo,
+                estado=ESTADO_ERROR,
+                detalle=str(exc)[:300]
+            )
 
-        # Un fallo transitorio no se indexa todavia: si la siguiente ronda lo
-        # baja bien, no debe quedar como error en el resumen ni en la base.
         if (reg.estado == ESTADO_ERROR and not ultima_ronda
                 and es_transitorio(reg.detalle)):
             reintentables.append(cand)
@@ -193,8 +207,6 @@ def _descargar_lote(candidatos, tema, n, settings, store, resumen, emitir,
 
     with ThreadPoolExecutor(max_workers=settings.concurrency) as ex:
         def lanzar():
-            # No se lanza mas de lo que falta: evita bajar videos de sobra
-            # cuando las descargas en curso terminan bien.
             while (len(en_vuelo) < settings.concurrency
                    and resumen.descargados + len(en_vuelo) < n
                    and not bandera.is_set()):
@@ -202,8 +214,7 @@ def _descargar_lote(candidatos, tema, n, settings, store, resumen, emitir,
                     cand = next(pendientes)
                 except StopIteration:
                     return
-                en_vuelo[ex.submit(descargar, cand, tema, settings, bandera,
-                                   intento)] = cand
+                en_vuelo[ex.submit(ejecutar_descarga, cand)] = cand
 
         lanzar()
         while en_vuelo:
@@ -212,19 +223,15 @@ def _descargar_lote(candidatos, tema, n, settings, store, resumen, emitir,
                 procesar(fut)
 
             if resumen.descargados >= n:
-                parar.set()                          # aborta lo que siga en vuelo
+                parar.set()
                 break
             if bandera.is_set():
                 break
             lanzar()
 
-        # Drena lo que quedaba corriendo: si alguno alcanzo a terminar bien,
-        # se indexa igual para no dejar archivos huerfanos en disco.
         while en_vuelo:
             hechos, _ = wait(list(en_vuelo), return_when=FIRST_COMPLETED)
             for fut in hechos:
                 procesar(fut)
 
-    # Lo que nunca llego a intentarse vuelve al final de la cola por si la
-    # siguiente ronda lo necesita.
     return reintentables, list(pendientes)
