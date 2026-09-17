@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from recopilador.store import ESQUEMA as ESQUEMA_RECOPILADOR
+from recopilador.store import ESQUEMA as ESQUEMA_RECOPILADOR, migrar_videos
 
 from .models import Clasificacion, EsquemaDataset, Transcripcion
 
@@ -80,6 +80,7 @@ class AnalisisStore:
             # Las tablas del recopilador tambien, por si se analiza antes de
             # haber descargado nunca: aqui se consulta `videos`, y sin esto la
             # primera consulta moriria con "no such table".
+            migrar_videos(self._con)
             self._con.executescript(ESQUEMA_RECOPILADOR)
             self._con.executescript(ESQUEMA)
             self._migrar()
@@ -249,7 +250,7 @@ class AnalisisStore:
     # -- lectura para el CSV ----------------------------------------------
     def filas_dataset(self, esquema: str, tema: Optional[str] = None,
                       solo_clasificados: bool = False) -> List[sqlite3.Row]:
-        sql = ("SELECT v.video_id, v.tema, v.titulo, v.url, v.canal, v.duracion, "
+        sql = ("SELECT v.video_id, v.plataforma, v.tema, v.titulo, v.url, v.canal, v.duracion, "
                "       v.ancho, v.alto, v.vistas, v.fecha_subida, v.descargado_en, "
                "       t.texto, t.idioma, t.prob_idioma, t.n_palabras, "
                "       t.modelo AS modelo_voz, "

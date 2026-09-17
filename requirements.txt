@@ -14,6 +14,11 @@ google-api-python-client>=2.100.0
 # .mp4 sin depender del ffmpeg.exe que usa la descarga.
 faster-whisper>=1.1.0
 
-# Para TikTok e Instagram
-instagraapi>=2.0.0        # Scraping y API no oficial de Instagram
-Playwright>=1.40.0        # Automatización de navegador para bypass de retos de TikTok/IG
+# Instagram: API privada no oficial (busqueda de Reels y descarga directa).
+# Ojo al nombre: es "instagrapi", con una sola "a".
+instagrapi>=2.1.0
+
+# TikTok: la busqueda se hace en un Chromium automatizado. Tras instalar hay
+# que descargar el navegador una vez:
+#     python -m playwright install chromium
+playwright>=1.45.0

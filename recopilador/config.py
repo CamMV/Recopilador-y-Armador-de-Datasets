@@ -83,9 +83,20 @@ class Settings:
     instagram_password: Optional[str] = field(
         default_factory=lambda: os.getenv("INSTAGRAM_PASSWORD") or None
     )
+    instagram_sessionid: Optional[str] = field(
+        default_factory=lambda: os.getenv("INSTAGRAM_SESSIONID") or None
+    )
     cookies_path: Optional[Path] = field(
         default_factory=lambda: (RAIZ / "cookies.txt") if (RAIZ / "cookies.txt").exists() else None
     )
+
+    # Navegador automatizado (busqueda en TikTok). TikTok bloquea el modo
+    # oculto y pide captcha a los visitantes anonimos, asi que por defecto la
+    # ventana se ve: si aparece un reto, lo resuelve la persona.
+    navegador_oculto: bool = field(
+        default_factory=lambda: os.getenv("RECOPILADOR_NAVEGADOR_OCULTO", "").lower() in ("1", "true", "si")
+    )
+    espera_captcha: float = 120.0   # segundos que se espera a que se resuelva un reto
 
     ffmpeg_dir: Optional[str] = field(default_factory=localizar_ffmpeg)
     js_runtimes: dict = field(default_factory=localizar_js_runtime)
@@ -120,6 +131,21 @@ class Settings:
     def archive_path(self) -> Path:
         return self.data_dir / "archive.txt"
 
+    @property
+    def sesiones_dir(self) -> Path:
+        """Sesiones y cookies por plataforma. Contiene credenciales: no compartir."""
+        return self.data_dir / ".sesiones"
+
+    def perfil_navegador(self, plataforma: str) -> Path:
+        return self.sesiones_dir / ("navegador_%s" % plataforma)
+
+    def cookies_de(self, plataforma: str) -> Optional[Path]:
+        """cookies.txt para yt-dlp: el exportado de la plataforma, o el global."""
+        propio = self.sesiones_dir / ("%s_cookies.txt" % plataforma)
+        if propio.exists():
+            return propio
+        return self.cookies_path
+
     def preparar(self) -> "Settings":
         """Crea el arbol de carpetas de datos. Idempotente."""
         for d in (self.data_dir, self.videos_dir, self.meta_dir, self.subs_dir):
@@ -147,7 +173,10 @@ class Settings:
         if encontrados_prefijo:
             return encontrados_prefijo[0]
 
-        # 2. Fallback sin prefijo (retrocompatibilidad con YouTube)
+        # 2. Fallback sin prefijo (retrocompatibilidad con YouTube). Solo para
+        # YouTube: un shortcode de Instagram podria coincidir con un id suyo.
+        if plataforma != "youtube":
+            return None
         encontrados_legacy = [
             p for p in self.videos_dir.glob(f"{video_id}.*")
             if p.suffix.lower() in EXT_VIDEO

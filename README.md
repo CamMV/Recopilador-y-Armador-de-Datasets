@@ -154,11 +154,13 @@ que repetirla. Ese ciclo corto es lo que permite iterar el esquema del dataset.
 
 ```bat
 .venv\Scripts\python.exe main.py --cli --tema "pesca artesanal" --n 50
+.venv\Scripts\python.exe main.py --cli -p tiktok --tema "pesca artesanal" --n 50
+.venv\Scripts\python.exe main.py --cli -p instagram --tema "pesca artesanal" --n 50
 .venv\Scripts\python.exe main.py --analizar --exportar
 .venv\Scripts\python.exe main.py --exportar-csv --tema "pesca artesanal"
 ```
 
-Descarga: `--max-dur` (segundos, 180 por defecto), `--hilos`, `--carpeta`, `--sin-subs`,
+Descarga: `--plataforma`/`-p` (`youtube`, `tiktok`, `instagram`), `--max-dur` (segundos, 180 por defecto), `--hilos`, `--carpeta`, `--sin-subs`,
 `--incluir-horizontales`.
 
 Análisis: `--esquema`, `--todos`, `--sin-clasificar`, `--retranscribir`, `--reclasificar`,
@@ -210,13 +212,46 @@ Con `YOUTUBE_API_KEY` en el `.env` se usa además la YouTube Data API v3 para de
 (100 unidades de cuota por búsqueda, ~100 búsquedas diarias en el plan gratuito). Si falta
 la key, la librería o la cuota, cae solo a yt-dlp.
 
+## TikTok e Instagram
+
+Ninguna de las dos deja buscar a visitantes anónimos, así que antes de la primera corrida hay
+que **iniciar sesión una vez** (botón «Iniciar sesión...» de la pestaña, o por consola):
+
+```bat
+.venv\Scripts\python.exe -m playwright install chromium
+.venv\Scripts\python.exe main.py --login tiktok
+.venv\Scripts\python.exe main.py --login instagram
+```
+
+Se abre un Chromium propio del proyecto; al detectar la sesión se guarda en
+`data/.sesiones/` (perfil del navegador, `*_cookies.txt` para yt-dlp y la sesión de
+instagrapi). **Esa carpeta equivale a una contraseña**: no la compartas. Usa cuentas
+secundarias; ambas plataformas restringen las cuentas que hacen muchas peticiones
+automáticas.
+
+- **TikTok.** La búsqueda abre la web en ese navegador (`/search/video?q=` y `/tag/<etiqueta>`)
+  y lee las respuestas de su API interna mientras hace scroll; de ahí salen también duración,
+  dimensiones y vistas, y lo que no cumple los filtros se descarta sin bajarlo. La ventana se
+  ve a propósito: si TikTok pide un captcha, lo resuelves tú y la búsqueda sigue (espera
+  `Settings.espera_captcha` segundos). La descarga es la misma de YouTube, con yt-dlp.
+- **Instagram.** Busca con [instagrapi](https://github.com/subzeroid/instagrapi): pestaña de
+  Reels del buscador y luego hashtags. Descarga el mp4 directamente del CDN con la URL que da la
+  búsqueda; si ha caducado, usa yt-dlp con las cookies de la sesión. En lugar de `--login` se
+  puede poner `INSTAGRAM_SESSIONID` o usuario y contraseña en el `.env` (ver `.env.example`).
+  Instagram no publica subtítulos.
+
+Los archivos de estas plataformas llevan prefijo (`tiktok_<id>.mp4`,
+`instagram_<shortcode>.mp4`); los de YouTube conservan el nombre `<id>.mp4` de siempre. El
+CSV exportado incluye la columna `plataforma`.
+
 ## Estructura del código
 
 | Archivo | Papel |
 |---|---|
 | `recopilador/config.py` | parámetros, rutas y localización de ffmpeg y del motor JS |
 | `recopilador/entorno.py` | comprobación de Python, yt-dlp y ffmpeg antes de descargar |
-| `recopilador/search/` | backends de búsqueda y verificación de Shorts |
+| `recopilador/providers/` | un scraper por plataforma (`buscar` + `descargar`) y el navegador con sesión |
+| `recopilador/search/` | backends de búsqueda y verificación de Shorts (YouTube) |
 | `recopilador/downloader.py` | descarga de un vídeo, en dos fases |
 | `recopilador/pipeline.py` | orquestación en paralelo y cancelación |
 | `recopilador/store.py` | índice SQLite |

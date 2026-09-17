@@ -19,7 +19,7 @@ from .models import EsquemaDataset
 from .store import AnalisisStore
 
 # Metadatos del video que acompanan a cada fila, en este orden.
-COLUMNAS_BASE = ["video_id", "url", "tema", "titulo", "canal", "duracion",
+COLUMNAS_BASE = ["video_id", "plataforma", "url", "tema", "titulo", "canal", "duracion",
                  "ancho", "alto", "vistas", "fecha_subida", "descargado_en"]
 
 COLUMNAS_VOZ = ["idioma", "prob_idioma", "n_palabras", "transcripcion"]
@@ -84,7 +84,7 @@ def _fila_csv(fila, esquema: EsquemaDataset) -> list:
     # leen como filas nuevas. El texto integro sigue en SQLite, con sus tiempos.
     texto = _ESPACIOS.sub(" ", fila["texto"] or "").strip()
 
-    valores = [fila["video_id"], fila["url"], fila["tema"], fila["titulo"],
+    valores = [fila["video_id"], fila["plataforma"] or "youtube", fila["url"], fila["tema"], fila["titulo"],
                fila["canal"], fila["duracion"], fila["ancho"], fila["alto"],
                fila["vistas"], fila["fecha_subida"], fila["descargado_en"],
                fila["idioma"] or "",

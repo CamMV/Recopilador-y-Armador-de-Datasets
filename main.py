@@ -92,6 +92,17 @@ def _cli(args):
     return 0 if resumen.descargados else 1
 
 
+def _login(args):
+    from recopilador.providers.navegador import NavegadorNoDisponible, iniciar_sesion
+
+    settings = Settings(data_dir=Path(args.carpeta) if args.carpeta else (RAIZ / "data"))
+    try:
+        return 0 if iniciar_sesion(settings, args.login) else 1
+    except NavegadorNoDisponible as exc:
+        print("No se puede abrir el navegador: %s" % exc)
+        return 1
+
+
 def _cargar_esquema(store, nombre):
     from analisis.models import esquema_por_defecto
     guardado = store.cargar_esquema(nombre)
@@ -199,6 +210,8 @@ def main(argv=None):
     p.add_argument("--carpeta", help="carpeta de datos")
     p.add_argument("--sin-subs", action="store_true", help="no descargar subtítulos")
     p.add_argument("--incluir-horizontales", action="store_true", help="incluir videos horizontales")
+    p.add_argument("--login", choices=["tiktok", "instagram"],
+                   help="abrir un navegador para iniciar sesion en la plataforma y guardar la sesion")
 
     g = p.add_argument_group("análisis (transcripción y dataset)")
     g.add_argument("--analizar", action="store_true", help="transcribir y clasificar lo ya descargado")
@@ -214,6 +227,9 @@ def main(argv=None):
     g.add_argument("--exportar", action="store_true", help="exportar CSV")
 
     args = p.parse_args(argv)
+
+    if args.login:
+        return _login(args)
 
     if args.cli:
         if not args.tema:

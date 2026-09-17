@@ -12,6 +12,8 @@ from .models import (ESTADO_DESCARTADO, ESTADO_ERROR, ESTADO_OK, ESTADO_OMITIDO,
 from .providers import BaseScraper, obtener_provider
 from .store import Store
 
+NOMBRES = {"youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram"}
+
 
 class _Bandera(object):
     """Une la cancelacion del usuario con la parada interna por objetivo cumplido."""
@@ -64,6 +66,7 @@ def recolectar(tema: str,
     bandera = _Bandera(cancel_event, parar)
 
     resumen = Resumen(tema=tema, pedidos=n)
+    provider: Optional[BaseScraper] = None
 
     try:
         # Instanciar el proveedor correspondiente (YouTube, TikTok, Instagram)
@@ -75,17 +78,20 @@ def recolectar(tema: str,
         if huerfanas:
             log("%d fichas o subtitulos sueltos sin video: se borran" % huerfanas)
 
-        # Filtrar IDs conocidos para esta plataforma en especifico
-        conocidos = store.ids_conocidos(plataforma) if hasattr(store, "ids_conocidos") else store.ids_conocidos()
+        # Ids conocidos de ESTA plataforma: los de otras no pueden coincidir
+        # con un candidato y solo inflarian el conjunto.
+        conocidos = store.ids_conocidos(provider.PLATAFORMA)
         if conocidos:
-            log("[%s] %d videos ya en el indice se excluiran de la busqueda" % (plataforma.upper(), len(conocidos)))
+            log("[%s] %d videos ya en el indice se excluiran de la busqueda"
+                % (provider.PLATAFORMA.upper(), len(conocidos)))
 
-        log("[%s] Buscando videos para el tema '%s'..." % (plataforma.upper(), tema))
-        candidatos = provider.buscar(tema, n, ids_excluir=conocidos)
+        log("[%s] Buscando videos para el tema '%s'..." % (provider.PLATAFORMA.upper(), tema))
+        candidatos = provider.buscar(tema, n, ids_excluir=conocidos, log=log,
+                                     cancel_event=bandera)
 
-        resumen.backend = plataforma
+        resumen.backend = "%s:%s" % (provider.PLATAFORMA, provider.backend)
         resumen.candidatos = len(candidatos)
-        emitir("busqueda", candidatos=len(candidatos), backend=plataforma, objetivo=n)
+        emitir("busqueda", candidatos=len(candidatos), backend=resumen.backend, objetivo=n)
 
         if not candidatos:
             log("la busqueda no devolvio candidatos nuevos")
@@ -106,6 +112,8 @@ def recolectar(tema: str,
         return resumen
 
     finally:
+        if provider is not None:
+            provider.cerrar()
         if store_propio:
             store.cerrar()
 
@@ -124,7 +132,12 @@ def _contabilizar(reg: RegistroVideo, resumen: Resumen):
 
 def _rondas(provider: BaseScraper, candidatos, tema, n, settings, store, resumen,
             emitir, log, bandera, parar):
-    """Descarga en rondas con reintentos para fallos transitorios."""
+    """Descarga en rondas: lo que falla por limite de la plataforma se reintenta.
+
+    Un lote entero puede fallar porque la plataforma esta cortando las
+    peticiones en ese momento; sin reintentos la corrida termina con cero
+    descargas aunque los videos esten perfectamente disponibles.
+    """
     pendientes = list(candidatos)
     for intento in range(settings.reintentos + 1):
         fallidos, sobrantes = _descargar_lote(provider, pendientes, tema, n, settings,
@@ -134,7 +147,7 @@ def _rondas(provider: BaseScraper, candidatos, tema, n, settings, store, resumen
         if not pendientes or resumen.descargados >= n or bandera.is_set():
             break
         if not fallidos:
-            continue
+            continue                # solo quedaban candidatos sin estrenar
         log("%d descargas fallaron de forma temporal; se reintentan en %.0f s"
             % (len(fallidos), settings.pausa_reintento))
         if _esperar(settings.pausa_reintento, bandera):
@@ -145,14 +158,24 @@ def _rondas(provider: BaseScraper, candidatos, tema, n, settings, store, resumen
 
     faltan = n - resumen.descargados
     if resumen.errores >= faltan:
-        log("Error recurrente en la descarga. Verifica conectividad o limites de la plataforma.")
+        log("%s rechazo las descargas de forma repetida (limite de peticiones o "
+            "falta de sesion). Espera unos minutos y vuelve a intentarlo; si sigue "
+            "igual, baja las descargas simultaneas a 1."
+            % NOMBRES.get(provider.PLATAFORMA, provider.PLATAFORMA))
     else:
-        log("Se agotaron los candidatos: %d de %d descargados." % (resumen.descargados, n))
+        log("se agotaron los candidatos: %d de %d descargados "
+            "(sube la cantidad pedida o amplia la duracion maxima)"
+            % (resumen.descargados, n))
 
 
 def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
                     resumen, emitir, bandera, parar, intento=0):
-    """Lanza ejecuciones paralelas de provider.descargar()."""
+    """Lanza una ronda de descargas.
+
+    Devuelve (fallidos_reintentables, no_intentados): los primeros fallaron por
+    algo pasajero, los segundos ni se llegaron a pedir porque ya se habia
+    cumplido el objetivo.
+    """
     pendientes = iter(candidatos)
     en_vuelo = {}
     reintentables = []
@@ -161,21 +184,8 @@ def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
     def ejecutar_descarga(candidato):
         if bandera.is_set():
             raise Cancelado()
-        
-        reg = provider.descargar(candidato)
-        if reg is None:
-            return RegistroVideo(
-                video_id=candidato.video_id,
-                plataforma=provider.PLATAFORMA,
-                tema=tema,
-                url=candidato.url,
-                titulo=candidato.titulo,
-                estado=ESTADO_ERROR,
-                detalle="Error al descargar o procesar con el proveedor"
-            )
-        
-        reg.tema = tema
-        return reg
+        return provider.descargar(candidato, tema, cancel_event=bandera,
+                                  intento=intento)
 
     def procesar(fut):
         cand = en_vuelo.pop(fut)
@@ -183,7 +193,7 @@ def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
             reg = fut.result()
         except Cancelado:
             return
-        except Exception as exc:
+        except Exception as exc:                    # red de seguridad
             reg = RegistroVideo(
                 video_id=cand.video_id,
                 plataforma=provider.PLATAFORMA,
@@ -194,6 +204,8 @@ def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
                 detalle=str(exc)[:300]
             )
 
+        # Un fallo transitorio no se indexa todavia: si la siguiente ronda lo
+        # baja bien, no debe quedar como error en el resumen ni en la base.
         if (reg.estado == ESTADO_ERROR and not ultima_ronda
                 and es_transitorio(reg.detalle)):
             reintentables.append(cand)
@@ -207,6 +219,8 @@ def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
 
     with ThreadPoolExecutor(max_workers=settings.concurrency) as ex:
         def lanzar():
+            # No se lanza mas de lo que falta: evita bajar videos de sobra
+            # cuando las descargas en curso terminan bien.
             while (len(en_vuelo) < settings.concurrency
                    and resumen.descargados + len(en_vuelo) < n
                    and not bandera.is_set()):
@@ -223,15 +237,19 @@ def _descargar_lote(provider: BaseScraper, candidatos, tema, n, settings, store,
                 procesar(fut)
 
             if resumen.descargados >= n:
-                parar.set()
+                parar.set()                          # aborta lo que siga en vuelo
                 break
             if bandera.is_set():
                 break
             lanzar()
 
+        # Drena lo que quedaba corriendo: si alguno alcanzo a terminar bien,
+        # se indexa igual para no dejar archivos huerfanos en disco.
         while en_vuelo:
             hechos, _ = wait(list(en_vuelo), return_when=FIRST_COMPLETED)
             for fut in hechos:
                 procesar(fut)
 
+    # Lo que nunca llego a intentarse vuelve al final de la cola por si la
+    # siguiente ronda lo necesita.
     return reintentables, list(pendientes)

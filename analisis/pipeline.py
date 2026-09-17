@@ -141,7 +141,8 @@ def _asegurar_transcripcion(fila, settings, ajustes, store, transcriptor,
     # Igual que en `Store.reconciliar`: la ruta guardada es absoluta y no
     # resuelve si el corpus se abre desde otro entorno, asi que se cae a la
     # convencion de nombres antes de darlo por ausente.
-    ruta = settings.localizar_video(fila["video_id"], fila["ruta_video"] or "")
+    plataforma = (fila["plataforma"] if "plataforma" in fila.keys() else None) or "youtube"
+    ruta = settings.localizar_video(fila["video_id"], fila["ruta_video"] or "", plataforma)
     if ruta is None:
         # El indice puede ir por delante del disco si se borraron videos a mano;
         # `Store.reconciliar` lo arregla en la siguiente descarga.

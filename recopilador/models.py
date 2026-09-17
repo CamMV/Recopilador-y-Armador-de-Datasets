@@ -15,16 +15,39 @@ class Candidato:
     """Un video encontrado en la busqueda, aun sin descargar."""
 
     video_id: str
-    plataforma = str
+    plataforma: str = "youtube"
     titulo: str = ""
     url: str = ""
     duracion: Optional[float] = None
     canal: str = ""
-    origen: str = "ytdlp"           # "ytdlp" | "api"
+    origen: str = "ytdlp"           # "ytdlp" | "api" | "navegador" | "instagrapi"
+    ancho: Optional[int] = None
+    alto: Optional[int] = None
+    vistas: Optional[int] = None
+    fecha_subida: str = ""
+    # Datos propios de la plataforma que la busqueda ya trae y la descarga
+    # aprovecha (p.ej. la URL directa del mp4 de Instagram).
+    extra: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if not self.url:
+        if not self.url and self.plataforma == "youtube":
             self.url = "https://www.youtube.com/watch?v=%s" % self.video_id
+
+    @property
+    def nombre_base(self) -> str:
+        """Nombre de fichero sin extension.
+
+        YouTube conserva el nombre historico `<id>` para no romper el corpus ya
+        descargado; el resto lleva prefijo, porque un shortcode de Instagram
+        tiene el mismo alfabeto y longitud que un id de YouTube.
+        """
+        return nombre_base(self.plataforma, self.video_id)
+
+
+def nombre_base(plataforma: str, video_id: str) -> str:
+    if not plataforma or plataforma == "youtube":
+        return video_id
+    return "%s_%s" % (plataforma, video_id)
 
 
 @dataclass

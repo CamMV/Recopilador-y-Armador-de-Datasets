@@ -47,6 +47,10 @@ class App(PanelBase):
             width=15
         )
         cb_plat.grid(row=fila, column=1, sticky="w", pady=2)
+        cb_plat.bind("<<ComboboxSelected>>", lambda _e: self._al_cambiar_plataforma())
+        self.btn_login = ttk.Button(self, text="Iniciar sesión...", command=self._login,
+                                    state="disabled")
+        self.btn_login.grid(row=fila, column=3, sticky="e", padx=(4, 0))
         fila += 1
 
         # Tema
@@ -103,6 +107,23 @@ class App(PanelBase):
         if elegida:
             self.var_carpeta.set(elegida)
 
+    def _al_cambiar_plataforma(self):
+        # YouTube no necesita sesion; TikTok e Instagram si, para buscar.
+        con_login = self.var_plataforma.get() in ("tiktok", "instagram")
+        self.btn_login.configure(state="normal" if con_login else "disabled")
+
+    def _login(self):
+        if self.trabajador.activo():
+            return
+        plataforma = self.var_plataforma.get()
+        settings = Settings(data_dir=Path(self.var_carpeta.get().strip() or (RAIZ / "data")))
+        self._escribir("=== [%s] inicio de sesión: usa la ventana del navegador; "
+                       "se cierra sola al detectar la sesión ===" % plataforma.upper())
+        self.btn_iniciar.configure(state="disabled")
+        self.btn_login.configure(state="disabled")
+        self.var_estado.set("Esperando inicio de sesión...")
+        self.trabajador.iniciar_login(plataforma, settings)
+
     def _abrir_carpeta(self):
         abrir_carpeta(self.var_carpeta.get())
 
@@ -146,6 +167,7 @@ class App(PanelBase):
         self.barra.configure(maximum=cantidad, value=0)
         self.var_estado.set("Buscando en %s..." % plataforma.title())
         self.btn_iniciar.configure(state="disabled")
+        self.btn_login.configure(state="disabled")
         self.btn_cancelar.configure(state="normal")
         self._escribir("=== [%s] %s | %d videos, hasta %d s, %d en paralelo ==="
                        % (plataforma.upper(), tema, cantidad, duracion, hilos))
@@ -189,6 +211,7 @@ class App(PanelBase):
         elif tipo == "terminado":
             self.btn_iniciar.configure(state="normal")
             self.btn_cancelar.configure(state="disabled")
+            self._al_cambiar_plataforma()
             self.var_estado.set("Listo.")
 
     def _linea_video(self, reg):

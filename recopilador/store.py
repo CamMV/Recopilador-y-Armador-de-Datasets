@@ -62,6 +62,55 @@ _CAMPOS = [
 ]
 
 
+def migrar_videos(con: sqlite3.Connection):
+    """Pasa una tabla `videos` anterior al soporte multiplataforma a la
+    clave (plataforma, video_id). No hace nada si ya esta al dia.
+
+    La usan las dos etapas: cualquiera puede ser la primera en abrir una
+    base antigua, y ESQUEMA crea un indice sobre `plataforma` que fallaria.
+    """
+    current = con.execute("PRAGMA table_info(videos)")
+    columnas = [row["name"] for row in current.fetchall()]
+    if columnas and "plataforma" not in columnas:
+        con.executescript("""
+            CREATE TABLE videos_nueva (
+                video_id      TEXT,
+                plataforma    TEXT DEFAULT 'youtube',
+                tema          TEXT,
+                titulo        TEXT,
+                url           TEXT,
+                canal         TEXT,
+                duracion      REAL,
+                ancho         INTEGER,
+                alto          INTEGER,
+                vistas        INTEGER,
+                fecha_subida  TEXT,
+                ruta_video    TEXT,
+                ruta_meta     TEXT,
+                ruta_subs     TEXT,
+                bytes_video   INTEGER,
+                descargado_en TEXT,
+                origen        TEXT,
+                estado        TEXT,
+                detalle       TEXT,
+                transcrito    INTEGER DEFAULT 0,
+                PRIMARY KEY (plataforma, video_id)
+            );
+            INSERT INTO videos_nueva (
+                video_id, plataforma, tema, titulo, url, canal, duracion,
+                ancho, alto, vistas, fecha_subida, ruta_video, ruta_meta,
+                ruta_subs, bytes_video, descargado_en, origen, estado, detalle, transcrito
+            )
+            SELECT 
+                video_id, 'youtube', tema, titulo, url, canal, duracion,
+                ancho, alto, vistas, fecha_subida, ruta_video, ruta_meta,
+                ruta_subs, bytes_video, descargado_en, origen, estado, detalle, transcrito
+            FROM videos;
+            DROP TABLE videos;
+            ALTER TABLE videos_nueva RENAME TO videos;
+        """)
+
+
 class Store:
     """Acceso al indice. Seguro para usarse desde varios hilos."""
 
@@ -75,46 +124,7 @@ class Store:
 
     def init_db(self):
         with self._lock:
-            current = self._con.execute("PRAGMA table_info(videos)")
-            columnas = [row["name"] for row in current.fetchall()]
-            if columnas and "plataforma" not in columnas:
-                self._con.executescript("""
-                    CREATE TABLE videos_nueva (
-                        video_id      TEXT,
-                        plataforma    TEXT DEFAULT 'youtube',
-                        tema          TEXT,
-                        titulo        TEXT,
-                        url           TEXT,
-                        canal         TEXT,
-                        duracion      REAL,
-                        ancho         INTEGER,
-                        alto          INTEGER,
-                        vistas        INTEGER,
-                        fecha_subida  TEXT,
-                        ruta_video    TEXT,
-                        ruta_meta     TEXT,
-                        ruta_subs     TEXT,
-                        bytes_video   INTEGER,
-                        descargado_en TEXT,
-                        origen        TEXT,
-                        estado        TEXT,
-                        detalle       TEXT,
-                        transcrito    INTEGER DEFAULT 0,
-                        PRIMARY KEY (plataforma, video_id)
-                    );
-                    INSERT INTO videos_nueva (
-                        video_id, plataforma, tema, titulo, url, canal, duracion,
-                        ancho, alto, vistas, fecha_subida, ruta_video, ruta_meta,
-                        ruta_subs, bytes_video, descargado_en, origen, estado, detalle, transcrito
-                    )
-                    SELECT 
-                        video_id, 'youtube', tema, titulo, url, canal, duracion,
-                        ancho, alto, vistas, fecha_subida, ruta_video, ruta_meta,
-                        ruta_subs, bytes_video, descargado_en, origen, estado, detalle, transcrito
-                    FROM videos;
-                    DROP TABLE videos;
-                    ALTER TABLE videos_nueva RENAME TO videos;
-                """)
+            migrar_videos(self._con)
             self._con.executescript(ESQUEMA)
             self._con.commit()
 

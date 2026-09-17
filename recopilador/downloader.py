@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Descarga de un Short con yt-dlp: video + metadatos + subtitulos.
+"""Descarga de un video corto con yt-dlp: video + metadatos + subtitulos.
+
+Sirve para YouTube, TikTok e Instagram: lo que cambia entre plataformas es el
+nombre de los ficheros, el selector de formato y las cookies.
 
 Se hace en dos fases a proposito. El video y su ficha van primero; los
 subtitulos automaticos van despues, en una pasada aparte cuyos fallos se
@@ -16,7 +19,7 @@ from typing import Optional
 
 from .config import EXT_VIDEO
 from .models import (Candidato, RegistroVideo, ESTADO_DESCARTADO, ESTADO_ERROR,
-                     ESTADO_OK, ESTADO_OMITIDO)
+                     ESTADO_OK, ESTADO_OMITIDO, nombre_base)
 
 # Claves voluminosas de la ficha que no aportan al analisis posterior: sin
 # ellas el .info.json baja de ~900 KB a unos pocos KB por video.
@@ -40,6 +43,13 @@ SENALES_TRANSITORIAS = (
     "unable to download video data",
     "failed to extract any player response",
     "read timed out",
+    "timed out",
+    "connection reset",
+    "rate-limit",
+    "rate limit",
+    "please wait a few minutes",
+    "http error 5",
+    "unable to extract universal data",     # TikTok cortando por ritmo
 )
 
 # Clientes de reproduccion para las rondas de reintento. Si el que YouTube esta
@@ -88,27 +98,33 @@ class _Filtro(object):
         # mas temprano donde se puede atender una cancelacion.
         if self.cancel_event is not None and self.cancel_event.is_set():
             raise Cancelado()
-        dur = info.get("duration")
-        if dur is not None and dur > self.settings.max_duration:
-            self.motivo = "dura %ds (maximo %ds)" % (int(dur), self.settings.max_duration)
-            return self.motivo
-        ancho, alto = info.get("width"), info.get("height")
-        if self.settings.solo_vertical and ancho and alto and ancho >= alto:
-            self.motivo = "horizontal (%sx%s)" % (ancho, alto)
-            return self.motivo
-        return None
+        self.motivo = motivo_descarte(self.settings, info.get("duration"),
+                                      info.get("width"), info.get("height"))
+        return self.motivo
 
 
-def _comunes(settings, cancel_event) -> dict:
+def motivo_descarte(settings, duracion, ancho, alto) -> Optional[str]:
+    """Por que un video no entra en el corpus, o None si entra."""
+    if duracion is not None and duracion > settings.max_duration:
+        return "dura %ds (maximo %ds)" % (int(duracion), settings.max_duration)
+    if settings.solo_vertical and ancho and alto and ancho >= alto:
+        return "horizontal (%sx%s)" % (ancho, alto)
+    return None
+
+
+def _comunes(settings, cancel_event, plataforma="youtube") -> dict:
     def hook(_d):
         if cancel_event is not None and cancel_event.is_set():
             raise Cancelado()
 
+    # La plantilla "%(id)s" pasa por el mismo prefijo que nombre_base(), asi
+    # los ficheros de yt-dlp y los de la descarga directa se llaman igual.
+    base = nombre_base(plataforma, "%(id)s")
     opciones = {
         "outtmpl": {
-            "default": str(settings.videos_dir / "%(id)s.%(ext)s"),
-            "infojson": str(settings.meta_dir / "%(id)s.%(ext)s"),
-            "subtitle": str(settings.subs_dir / "%(id)s.%(ext)s"),
+            "default": str(settings.videos_dir / (base + ".%(ext)s")),
+            "infojson": str(settings.meta_dir / (base + ".%(ext)s")),
+            "subtitle": str(settings.subs_dir / (base + ".%(ext)s")),
         },
         "sleep_interval_requests": 0.75,
         "retries": 3,
@@ -128,28 +144,42 @@ def _comunes(settings, cancel_event) -> dict:
     # deno por defecto en vez de dejarlo como esta.
     if getattr(settings, "js_runtimes", None):
         opciones["js_runtimes"] = dict(settings.js_runtimes)
+    cookies = settings.cookies_de(plataforma)
+    if cookies:
+        opciones["cookiefile"] = str(cookies)
     return opciones
 
 
-def _opciones_video(settings, cancel_event, filtro, intento=0) -> dict:
-    # El limite se expresa sobre el LADO CORTO: en un Short vertical la altura
-    # es el lado largo (1280, 1920), asi que filtrar por height<=720 dejaba
-    # fuera todo salvo los 360x640. El campo `res` de yt-dlp es justamente el
-    # menor de ancho y alto, y se aplica ordenando, no filtrando.
+def _formato(settings, plataforma) -> str:
+    if plataforma != "youtube":
+        # TikTok e Instagram sirven mp4 ya mezclados, en H.264 y en H.265
+        # (bytevc1). Se prefiere H.264 por compatibilidad; Instagram ademas
+        # ofrece pistas DASH separadas, que solo se usan si no hay otra cosa.
+        fmt = ("best[ext=mp4][vcodec^=h264]/best[ext=mp4][vcodec^=avc1]/"
+               "best[ext=mp4]/best")
+        if settings.ffmpeg_dir:
+            fmt += "/bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio"
+        return fmt
     if settings.ffmpeg_dir:
         # Con ffmpeg se pueden mezclar pistas separadas, que dan mas calidad
         # que el mp4 ya mezclado (suele venir solo en 360p). Se piden H.264 y
         # AAC antes que VP9/AV1+Opus: dentro de un .mp4 estos ultimos abren mal
         # en muchos reproductores y librerias de vision por computador.
-        fmt = ("bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-               "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-               "best[ext=mp4]/bestvideo+bestaudio/best")
-    else:
-        fmt = "best[ext=mp4]/best"
+        return ("bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+                "best[ext=mp4]/bestvideo+bestaudio/best")
+    return "best[ext=mp4]/best"
 
-    opciones = _comunes(settings, cancel_event)
+
+def _opciones_video(settings, cancel_event, filtro, intento=0,
+                    plataforma="youtube") -> dict:
+    # El limite se expresa sobre el LADO CORTO: en un Short vertical la altura
+    # es el lado largo (1280, 1920), asi que filtrar por height<=720 dejaba
+    # fuera todo salvo los 360x640. El campo `res` de yt-dlp es justamente el
+    # menor de ancho y alto, y se aplica ordenando, no filtrando.
+    opciones = _comunes(settings, cancel_event, plataforma)
     opciones.update({
-        "format": fmt,
+        "format": _formato(settings, plataforma),
         "format_sort": ["res:%d" % settings.max_resolucion],
         "merge_output_format": "mp4",
         "match_filter": filtro,
@@ -158,19 +188,29 @@ def _opciones_video(settings, cancel_event, filtro, intento=0) -> dict:
         "sleep_interval": settings.sleep_interval,
         "max_sleep_interval": max(settings.sleep_interval, 3.0),
     })
-    if intento:
+    if intento and plataforma == "youtube":
         clientes = CLIENTES_REINTENTO[min(intento, len(CLIENTES_REINTENTO)) - 1]
         opciones["extractor_args"] = {"youtube": {"player_client": list(clientes)}}
     return opciones
 
 
-def _opciones_subs(settings, cancel_event) -> dict:
-    opciones = _comunes(settings, cancel_event)
+def _idiomas_subs(settings, plataforma) -> list:
+    idiomas = list(settings.idiomas_subs)
+    if plataforma == "tiktok":
+        # TikTok etiqueta con ISO 639-2 y region: "spa-ES", "eng-US".
+        tres = {"es": "spa", "en": "eng", "pt": "por", "fr": "fra"}
+        idiomas = ["%s.*" % i for i in idiomas] + \
+                  ["%s.*" % tres[i] for i in settings.idiomas_subs if i in tres]
+    return idiomas
+
+
+def _opciones_subs(settings, cancel_event, plataforma="youtube") -> dict:
+    opciones = _comunes(settings, cancel_event, plataforma)
     opciones.update({
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": list(settings.idiomas_subs),
+        "subtitleslangs": _idiomas_subs(settings, plataforma),
         "subtitlesformat": "vtt",
         "sleep_interval_subtitles": 1,
         "logger": _SinVoz(),        # el 429 de subtitulos no debe ensuciar la salida
@@ -178,21 +218,17 @@ def _opciones_subs(settings, cancel_event) -> dict:
     return opciones
 
 
-def _limpiar_restos(video_id: str, settings):
+def _limpiar_restos(base: str, settings):
     """Borra lo que quedo a medias de un video abortado."""
     for carpeta in (settings.videos_dir, settings.meta_dir, settings.subs_dir):
-        for resto in carpeta.glob("%s.*" % video_id):
+        for resto in carpeta.glob("%s.*" % base):
             try:
                 resto.unlink()
             except OSError:
                 pass
 
 
-def _buscar_en_disco(video_id: str, settings) -> Optional[Path]:
-    return settings.localizar_video(video_id)
-
-
-def _ruta_video(ydl, info, settings) -> Optional[Path]:
+def _ruta_video(ydl, info, settings, plataforma="youtube") -> Optional[Path]:
     """Ubica el archivo realmente escrito en disco."""
     for req in (info.get("requested_downloads") or []):
         ruta = req.get("filepath") or req.get("_filename")
@@ -204,7 +240,7 @@ def _ruta_video(ydl, info, settings) -> Optional[Path]:
             return ruta
     except Exception:
         pass
-    return _buscar_en_disco(info.get("id", ""), settings)
+    return settings.localizar_video(info.get("id", ""), plataforma=plataforma)
 
 
 def _aligerar_ficha(ruta_meta: Path):
@@ -224,8 +260,9 @@ def _bajar_subs(cand: Candidato, settings, cancel_event) -> str:
     """Segunda fase, opcional y tolerante a fallos."""
     from yt_dlp import YoutubeDL
 
+    base = cand.nombre_base
     try:
-        with YoutubeDL(_opciones_subs(settings, cancel_event)) as ydl:
+        with YoutubeDL(_opciones_subs(settings, cancel_event, cand.plataforma)) as ydl:
             ydl.extract_info(cand.url, download=True)
     except Cancelado:
         raise
@@ -233,14 +270,25 @@ def _bajar_subs(cand: Candidato, settings, cancel_event) -> str:
         pass                        # 429 y similares: los subtitulos son opcionales
 
     # yt-dlp los deja junto al video cuando no descarga video: se recolocan.
-    for suelto in settings.videos_dir.glob("%s.*" % cand.video_id):
+    for suelto in settings.videos_dir.glob("%s.*" % base):
         if suelto.suffix.lower() in EXT_VIDEO:
             continue
         try:
             suelto.replace(settings.subs_dir / suelto.name)
         except OSError:
             pass
-    return ";".join(sorted(str(p) for p in settings.subs_dir.glob("%s.*" % cand.video_id)))
+    return ";".join(sorted(str(p) for p in settings.subs_dir.glob("%s.*" % base)))
+
+
+def registro_base(cand: Candidato, tema: str) -> RegistroVideo:
+    """Registro inicial con lo que la busqueda ya sabe del candidato."""
+    return RegistroVideo(
+        video_id=cand.video_id, plataforma=cand.plataforma, tema=tema,
+        titulo=cand.titulo, url=cand.url, canal=cand.canal,
+        duracion=cand.duracion, ancho=cand.ancho, alto=cand.alto,
+        vistas=cand.vistas, fecha_subida=cand.fecha_subida, origen=cand.origen,
+        descargado_en=datetime.now().isoformat(timespec="seconds"),
+    )
 
 
 def descargar(cand: Candidato, tema: str, settings, cancel_event=None,
@@ -253,16 +301,15 @@ def descargar(cand: Candidato, tema: str, settings, cancel_event=None,
     """
     from yt_dlp import YoutubeDL
 
-    reg = RegistroVideo(
-        video_id=cand.video_id, tema=tema, titulo=cand.titulo, url=cand.url,
-        canal=cand.canal, duracion=cand.duracion, origen=cand.origen,
-        descargado_en=datetime.now().isoformat(timespec="seconds"),
-    )
+    reg = registro_base(cand, tema)
+    plataforma = cand.plataforma
+    base = cand.nombre_base
     filtro = _Filtro(settings, cancel_event)
 
     # -- fase 1: video + ficha -------------------------------------------
     try:
-        with YoutubeDL(_opciones_video(settings, cancel_event, filtro, intento)) as ydl:
+        opciones = _opciones_video(settings, cancel_event, filtro, intento, plataforma)
+        with YoutubeDL(opciones) as ydl:
             info = ydl.extract_info(cand.url, download=True)
 
             if filtro.motivo:
@@ -279,22 +326,22 @@ def descargar(cand: Candidato, tema: str, settings, cancel_event=None,
             reg.duracion = info.get("duration") or reg.duracion
             reg.ancho = info.get("width")
             reg.alto = info.get("height")
-            reg.vistas = info.get("view_count")
-            reg.fecha_subida = info.get("upload_date") or ""
+            reg.vistas = info.get("view_count") or reg.vistas
+            reg.fecha_subida = info.get("upload_date") or reg.fecha_subida
 
-            ruta = _ruta_video(ydl, info, settings)
+            ruta = _ruta_video(ydl, info, settings, plataforma)
 
     except Cancelado:
-        _limpiar_restos(cand.video_id, settings)
+        _limpiar_restos(base, settings)
         raise
     except Exception as exc:
         if cancel_event is not None and cancel_event.is_set():
-            _limpiar_restos(cand.video_id, settings)
+            _limpiar_restos(base, settings)
             raise Cancelado()
         # La ficha .info.json se escribe antes de bajar el video: si la descarga
         # falla hay que barrerla, o queda huerfana en meta/ sin su .mp4. Con las
         # rondas de reintento esto se acumularia.
-        _limpiar_restos(cand.video_id, settings)
+        _limpiar_restos(base, settings)
         reg.estado = ESTADO_ERROR
         reg.detalle = str(exc).replace("\n", " ")[:300]
         return reg
@@ -304,7 +351,7 @@ def descargar(cand: Candidato, tema: str, settings, cancel_event=None,
         reg.detalle = "ya estaba descargado (archive.txt)"
         return reg
 
-    meta = settings.meta_dir / ("%s.info.json" % cand.video_id)
+    meta = settings.meta_dir / ("%s.info.json" % base)
     if meta.exists():
         _aligerar_ficha(meta)
         reg.ruta_meta = str(meta)
@@ -314,7 +361,8 @@ def descargar(cand: Candidato, tema: str, settings, cancel_event=None,
     reg.estado = ESTADO_OK
 
     # -- fase 2: subtitulos, sin que su fallo invalide el video -----------
-    if settings.subtitulos:
+    # Instagram no publica subtitulos: la pasada solo gastaria peticiones.
+    if settings.subtitulos and plataforma != "instagram":
         try:
             reg.ruta_subs = _bajar_subs(cand, settings, cancel_event)
         except Cancelado:

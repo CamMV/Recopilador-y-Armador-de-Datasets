@@ -16,7 +16,7 @@ YTDLP_MINIMO = (2026, 1, 1)
 RECETA = ("Abre la app con recopilador.bat, que usa el entorno del proyecto. Si el "
           "entorno no existe, crealo con:\n"
           "    py -3.11 -m venv .venv\n"
-          "    .venv\Scripts\python.exe -m pip install -r requirements.txt")
+          "    .venv\\Scripts\\python.exe -m pip install -r requirements.txt")
 
 
 def _tupla(version: str) -> tuple:
@@ -65,7 +65,7 @@ def problemas(settings=None) -> list:
             "yt-dlp %s esta desfasado: YouTube cambia su proteccion cada pocas "
             "semanas y las versiones viejas dejan de poder descargar.\n"
             "Actualizalo con:\n"
-            "    .venv\Scripts\python.exe -m pip install -U yt-dlp" % v)
+            "    .venv\\Scripts\\python.exe -m pip install -U yt-dlp" % v)
 
     if settings is None:
         try:

@@ -2,11 +2,12 @@
 """Factory de scrapers por plataforma."""
 
 from typing import Dict, Type
-from .base import BaseScraper
-from .youtube import YouTubeScraper
-from .tiktok import TikTokScraper
-from .instagram import InstagramScraper
+
 from ..config import Settings
+from .base import BaseScraper, CandidatoVideo  # noqa: F401
+from .instagram import InstagramScraper
+from .tiktok import TikTokScraper
+from .youtube import YouTubeScraper
 
 _SCRAPERS: Dict[str, Type[BaseScraper]] = {
     "youtube": YouTubeScraper,
@@ -14,10 +15,12 @@ _SCRAPERS: Dict[str, Type[BaseScraper]] = {
     "instagram": InstagramScraper,
 }
 
+PLATAFORMAS = tuple(_SCRAPERS)
+
 
 def obtener_provider(plataforma: str, settings: Settings) -> BaseScraper:
     """Instancia y devuelve el scraper correspondiente a la plataforma solicitada."""
-    plat_key = plataforma.lower().strip()
+    plat_key = (plataforma or "").lower().strip()
     if plat_key not in _SCRAPERS:
         raise ValueError(f"Plataforma '{plataforma}' no soportada. Opciones: {list(_SCRAPERS.keys())}")
     return _SCRAPERS[plat_key](settings)
